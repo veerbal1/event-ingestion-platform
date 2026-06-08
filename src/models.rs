@@ -68,6 +68,13 @@ pub struct StoredEventResponse {
 }
 
 #[derive(Serialize)]
+pub struct EventStatusResponse {
+    pub event_id: Uuid,
+    pub status: String,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
 pub struct ErrorResponse {
     pub status: String,
     pub message: String,

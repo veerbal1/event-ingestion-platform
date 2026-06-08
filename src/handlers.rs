@@ -8,7 +8,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{
-    CreateEventRequest, ErrorResponse, EventResponse, StoredEventResponse, validate_request,
+    CreateEventRequest, ErrorResponse, EventResponse, EventStatusResponse, StoredEventResponse,
+    validate_request,
 };
 
 pub async fn root_handler() -> (StatusCode, &'static str) {
@@ -147,6 +148,50 @@ pub async fn get_event_handler(
             Json(ErrorResponse {
                 status: "failed".to_string(),
                 message: "failed to fetch event".to_string(),
+            }),
+        )),
+    }
+}
+
+pub async fn get_event_status_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<EventStatusResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let lookup_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
+        r#"
+        SELECT
+            id,
+            status,
+            received_at
+        FROM events
+        WHERE id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await;
+
+    match lookup_result {
+        Ok(Some((event_id, status, received_at))) => Ok((
+            StatusCode::OK,
+            Json(EventStatusResponse {
+                event_id,
+                status,
+                received_at,
+            }),
+        )),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                status: "not_found".to_string(),
+                message: "event not found".to_string(),
+            }),
+        )),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                status: "failed".to_string(),
+                message: "failed to fetch event status".to_string(),
             }),
         )),
     }
