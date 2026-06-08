@@ -8,8 +8,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{
-    CreateEventRequest, ErrorResponse, EventResponse, EventStatusResponse, StoredEventResponse,
-    request_fingerprint, validate_request,
+    CreateEventRequest, ErrorResponse, EventResponse, EventStatus, EventStatusResponse,
+    StoredEventResponse, UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint,
+    validate_request,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -312,6 +313,96 @@ pub async fn get_event_status_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed",
             "failed to fetch event status",
+        )),
+    }
+}
+
+pub async fn update_event_status_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<String>,
+    Json(payload): Json<UpdateEventStatusRequest>,
+) -> Result<(StatusCode, Json<EventStatusResponse>), ApiError> {
+    let event_id = parse_event_id(&event_id)?;
+    let next_status = EventStatus::parse(payload.status.trim()).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "status must be one of: accepted, processing, processed, failed",
+        )
+    })?;
+    let next_status_value = next_status.as_str();
+
+    let current_status_result = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT status
+        FROM events
+        WHERE id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let current_status = match current_status_result {
+        Ok(Some((current_status,))) => current_status,
+        Ok(None) => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "event not found",
+            ));
+        }
+        Err(_) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to fetch event status",
+            ));
+        }
+    };
+
+    if current_status == next_status_value {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event already has the requested status",
+        ));
+    }
+
+    if !is_valid_status_transition(&current_status, &next_status) {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "invalid status transition",
+        ));
+    }
+
+    let update_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
+        r#"
+        UPDATE events
+        SET status = $1
+        WHERE id = $2
+        RETURNING id, status, received_at
+        "#,
+    )
+    .bind(next_status_value)
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await;
+
+    match update_result {
+        Ok((event_id, status, received_at)) => Ok((
+            StatusCode::OK,
+            Json(EventStatusResponse {
+                event_id,
+                status,
+                received_at,
+            }),
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed",
+            "failed to update event status",
         )),
     }
 }

@@ -7,7 +7,7 @@ use axum::{
 };
 use handlers::{
     events_handler, get_event_handler, get_event_status_handler, health_handler, ready_handler,
-    root_handler,
+    root_handler, update_event_status_handler,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -38,7 +38,7 @@ async fn main() {
         .route("/v1/events/{event_id}", get(get_event_handler))
         .route(
             "/v1/events/{event_id}/status",
-            get(get_event_status_handler),
+            get(get_event_status_handler).patch(update_event_status_handler),
         )
         .with_state(pool);
 

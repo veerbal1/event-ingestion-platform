@@ -8,12 +8,47 @@ const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
 const MAX_MESSAGE_LEN: usize = 1000;
 const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
+const STATUS_ACCEPTED: &str = "accepted";
+const STATUS_PROCESSING: &str = "processing";
+const STATUS_PROCESSED: &str = "processed";
+const STATUS_FAILED: &str = "failed";
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum EventType {
     #[serde(rename = "user.signup")]
     UserSignup,
     #[serde(rename = "payment.completed")]
     PaymentCompleted,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventStatus {
+    Accepted,
+    Processing,
+    Processed,
+    Failed,
+}
+
+impl EventStatus {
+    pub fn parse(status: &str) -> Option<Self> {
+        match status {
+            STATUS_ACCEPTED => Some(Self::Accepted),
+            STATUS_PROCESSING => Some(Self::Processing),
+            STATUS_PROCESSED => Some(Self::Processed),
+            STATUS_FAILED => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => STATUS_ACCEPTED,
+            Self::Processing => STATUS_PROCESSING,
+            Self::Processed => STATUS_PROCESSED,
+            Self::Failed => STATUS_FAILED,
+        }
+    }
 }
 
 impl EventType {
@@ -55,6 +90,11 @@ pub struct CreateEventRequest {
     pub event_type: EventType,
     pub schema_version: u32,
     pub message: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UpdateEventStatusRequest {
+    pub status: String,
 }
 
 #[derive(Serialize)]
@@ -123,6 +163,17 @@ pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError>
         return Err(ValidationError::MessageTooLong);
     }
     Ok(())
+}
+
+pub fn is_valid_status_transition(current: &str, next: &EventStatus) -> bool {
+    match (current, next) {
+        (
+            STATUS_ACCEPTED,
+            EventStatus::Processing | EventStatus::Processed | EventStatus::Failed,
+        ) => true,
+        (STATUS_PROCESSING, EventStatus::Processed | EventStatus::Failed) => true,
+        _ => false,
+    }
 }
 
 pub fn request_fingerprint(req: &CreateEventRequest) -> String {
