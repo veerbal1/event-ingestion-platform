@@ -5,7 +5,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use handlers::{events_handler, health_handler, ready_handler, root_handler};
+use handlers::{events_handler, get_event_handler, health_handler, ready_handler, root_handler};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -32,6 +32,7 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
         .route("/v1/events", post(events_handler))
+        .route("/v1/events/{event_id}", get(get_event_handler))
         .with_state(pool);
 
     let addr = "127.0.0.1:3000";

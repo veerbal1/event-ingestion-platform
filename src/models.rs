@@ -56,6 +56,23 @@ pub struct EventResponse {
     pub received_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Serialize)]
+pub struct StoredEventResponse {
+    pub event_id: Uuid,
+    pub producer_id: String,
+    pub event_type: String,
+    pub schema_version: i32,
+    pub message: String,
+    pub status: String,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct ErrorResponse {
+    pub status: String,
+    pub message: String,
+}
+
 pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError> {
     let producer_id = req.producer_id.trim();
     if producer_id.trim().is_empty() || producer_id.trim().len() > MAX_PRODUCER_ID_LEN {

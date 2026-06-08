@@ -1,9 +1,15 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{CreateEventRequest, EventResponse, validate_request};
+use crate::models::{
+    CreateEventRequest, ErrorResponse, EventResponse, StoredEventResponse, validate_request,
+};
 
 pub async fn root_handler() -> (StatusCode, &'static str) {
     (StatusCode::OK, "OK")
@@ -83,4 +89,65 @@ pub async fn events_handler(
             received_at: Some(received_at),
         }),
     )
+}
+
+pub async fn get_event_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<StoredEventResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let lookup_result =
+        sqlx::query_as::<_, (Uuid, String, String, i32, String, String, DateTime<Utc>)>(
+            r#"
+        SELECT
+            id,
+            producer_id,
+            event_type,
+            schema_version,
+            message,
+            status,
+            received_at
+        FROM events
+        WHERE id = $1
+        "#,
+        )
+        .bind(event_id)
+        .fetch_optional(&pool)
+        .await;
+
+    match lookup_result {
+        Ok(Some((
+            event_id,
+            producer_id,
+            event_type,
+            schema_version,
+            message,
+            status,
+            received_at,
+        ))) => Ok((
+            StatusCode::OK,
+            Json(StoredEventResponse {
+                event_id,
+                producer_id,
+                event_type,
+                schema_version,
+                message,
+                status,
+                received_at,
+            }),
+        )),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                status: "not_found".to_string(),
+                message: "event not found".to_string(),
+            }),
+        )),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                status: "failed".to_string(),
+                message: "failed to fetch event".to_string(),
+            }),
+        )),
+    }
 }
