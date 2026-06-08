@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::models::{
     CreateEventRequest, ErrorResponse, EventResponse, EventStatusResponse, StoredEventResponse,
-    validate_request,
+    request_fingerprint, validate_request,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -59,20 +59,24 @@ pub async fn events_handler(
         ));
     }
 
+    let fingerprint = request_fingerprint(&payload);
+
     let insert_result = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
         r#"
         INSERT INTO events (
             idempotency_key,
+            request_fingerprint,
             producer_id,
             event_type,
             schema_version,
             message
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id, received_at
         "#,
     )
     .bind(payload.idempotency_key.trim())
+    .bind(&fingerprint)
     .bind(payload.producer_id.trim())
     .bind(payload.event_type.as_str())
     .bind(payload.schema_version as i32)
@@ -113,6 +117,7 @@ pub async fn get_event_handler(
         (
             Uuid,
             String,
+            Option<String>,
             String,
             String,
             i32,
@@ -125,6 +130,7 @@ pub async fn get_event_handler(
         SELECT
             id,
             idempotency_key,
+            request_fingerprint,
             producer_id,
             event_type,
             schema_version,
@@ -143,6 +149,7 @@ pub async fn get_event_handler(
         Ok(Some((
             event_id,
             idempotency_key,
+            request_fingerprint,
             producer_id,
             event_type,
             schema_version,
@@ -154,6 +161,7 @@ pub async fn get_event_handler(
             Json(StoredEventResponse {
                 event_id,
                 idempotency_key,
+                request_fingerprint,
                 producer_id,
                 event_type,
                 schema_version,

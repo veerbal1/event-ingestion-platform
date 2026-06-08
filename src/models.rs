@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const MAX_PRODUCER_ID_LEN: usize = 64;
@@ -68,6 +69,7 @@ pub struct EventResponse {
 pub struct StoredEventResponse {
     pub event_id: Uuid,
     pub idempotency_key: String,
+    pub request_fingerprint: Option<String>,
     pub producer_id: String,
     pub event_type: String,
     pub schema_version: i32,
@@ -121,4 +123,25 @@ pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError>
         return Err(ValidationError::MessageTooLong);
     }
     Ok(())
+}
+
+pub fn request_fingerprint(req: &CreateEventRequest) -> String {
+    let mut hasher = Sha256::new();
+    let schema_version = req.schema_version.to_string();
+
+    update_fingerprint_field(&mut hasher, "producer_id", req.producer_id.trim());
+    update_fingerprint_field(&mut hasher, "event_type", req.event_type.as_str());
+    update_fingerprint_field(&mut hasher, "schema_version", &schema_version);
+    update_fingerprint_field(&mut hasher, "message", req.message.trim());
+
+    hex::encode(hasher.finalize())
+}
+
+fn update_fingerprint_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
 }
