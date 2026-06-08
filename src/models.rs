@@ -27,6 +27,7 @@ impl EventType {
 pub enum ValidationError {
     InvalidProducerId,
     UnsupportedSchemaVersion,
+    EmptyMessage,
     MessageTooLong,
 }
 
@@ -35,6 +36,7 @@ impl ValidationError {
         match self {
             Self::InvalidProducerId => "producer_id must be 1-64 non-whitespace characters",
             Self::UnsupportedSchemaVersion => "unsupported schema_version",
+            Self::EmptyMessage => "message must not be empty",
             Self::MessageTooLong => "message exceeds maximum length",
         }
     }
@@ -80,15 +82,29 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+impl ErrorResponse {
+    pub fn new(status: &str, message: &str) -> Self {
+        Self {
+            status: status.to_string(),
+            message: message.to_string(),
+        }
+    }
+}
+
 pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError> {
     let producer_id = req.producer_id.trim();
-    if producer_id.trim().is_empty() || producer_id.trim().len() > MAX_PRODUCER_ID_LEN {
+    if producer_id.is_empty() || producer_id.len() > MAX_PRODUCER_ID_LEN {
         return Err(ValidationError::InvalidProducerId);
     }
     if req.schema_version != SUPPORTED_SCHEMA_VERSION {
         return Err(ValidationError::UnsupportedSchemaVersion);
     }
-    if req.message.trim().len() > MAX_MESSAGE_LEN {
+
+    let message = req.message.trim();
+    if message.is_empty() {
+        return Err(ValidationError::EmptyMessage);
+    }
+    if message.len() > MAX_MESSAGE_LEN {
         return Err(ValidationError::MessageTooLong);
     }
     Ok(())

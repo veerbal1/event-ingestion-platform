@@ -12,6 +12,22 @@ use crate::models::{
     validate_request,
 };
 
+type ApiError = (StatusCode, Json<ErrorResponse>);
+
+fn error_response(status_code: StatusCode, status: &str, message: &str) -> ApiError {
+    (status_code, Json(ErrorResponse::new(status, message)))
+}
+
+fn parse_event_id(event_id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(event_id).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "event_id must be a valid UUID",
+        )
+    })
+}
+
 pub async fn root_handler() -> (StatusCode, &'static str) {
     (StatusCode::OK, "OK")
 }
@@ -34,17 +50,13 @@ pub async fn ready_handler(
 pub async fn events_handler(
     State(pool): State<PgPool>,
     Json(payload): Json<CreateEventRequest>,
-) -> (StatusCode, Json<EventResponse>) {
+) -> Result<(StatusCode, Json<EventResponse>), ApiError> {
     if let Err(err) = validate_request(&payload) {
-        return (
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
-            Json(EventResponse {
-                event_id: None,
-                status: "failed".to_string(),
-                message: err.message().to_string(),
-                received_at: None,
-            }),
-        );
+            "invalid_request",
+            err.message(),
+        ));
     }
 
     let insert_result = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
@@ -69,19 +81,15 @@ pub async fn events_handler(
     let (event_id, received_at) = match insert_result {
         Ok(inserted_event) => inserted_event,
         Err(_) => {
-            return (
+            return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(EventResponse {
-                    event_id: None,
-                    status: "failed".to_string(),
-                    message: "failed to store event".to_string(),
-                    received_at: None,
-                }),
-            );
+                "failed",
+                "failed to store event",
+            ));
         }
     };
 
-    (
+    Ok((
         StatusCode::ACCEPTED,
         Json(EventResponse {
             event_id: Some(event_id),
@@ -89,13 +97,15 @@ pub async fn events_handler(
             message: format!("{} event received", payload.event_type.as_str()),
             received_at: Some(received_at),
         }),
-    )
+    ))
 }
 
 pub async fn get_event_handler(
     State(pool): State<PgPool>,
-    Path(event_id): Path<Uuid>,
-) -> Result<(StatusCode, Json<StoredEventResponse>), (StatusCode, Json<ErrorResponse>)> {
+    Path(event_id): Path<String>,
+) -> Result<(StatusCode, Json<StoredEventResponse>), ApiError> {
+    let event_id = parse_event_id(&event_id)?;
+
     let lookup_result =
         sqlx::query_as::<_, (Uuid, String, String, i32, String, String, DateTime<Utc>)>(
             r#"
@@ -136,27 +146,25 @@ pub async fn get_event_handler(
                 received_at,
             }),
         )),
-        Ok(None) => Err((
+        Ok(None) => Err(error_response(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                status: "not_found".to_string(),
-                message: "event not found".to_string(),
-            }),
+            "not_found",
+            "event not found",
         )),
-        Err(_) => Err((
+        Err(_) => Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                status: "failed".to_string(),
-                message: "failed to fetch event".to_string(),
-            }),
+            "failed",
+            "failed to fetch event",
         )),
     }
 }
 
 pub async fn get_event_status_handler(
     State(pool): State<PgPool>,
-    Path(event_id): Path<Uuid>,
-) -> Result<(StatusCode, Json<EventStatusResponse>), (StatusCode, Json<ErrorResponse>)> {
+    Path(event_id): Path<String>,
+) -> Result<(StatusCode, Json<EventStatusResponse>), ApiError> {
+    let event_id = parse_event_id(&event_id)?;
+
     let lookup_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
         r#"
         SELECT
@@ -180,19 +188,15 @@ pub async fn get_event_status_handler(
                 received_at,
             }),
         )),
-        Ok(None) => Err((
+        Ok(None) => Err(error_response(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                status: "not_found".to_string(),
-                message: "event not found".to_string(),
-            }),
+            "not_found",
+            "event not found",
         )),
-        Err(_) => Err((
+        Err(_) => Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                status: "failed".to_string(),
-                message: "failed to fetch event status".to_string(),
-            }),
+            "failed",
+            "failed to fetch event status",
         )),
     }
 }
