@@ -13,6 +13,7 @@ use crate::models::{
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
+type IdempotencyLookup = (Uuid, Option<String>, String, DateTime<Utc>);
 
 fn error_response(status_code: StatusCode, status: &str, message: &str) -> ApiError {
     (status_code, Json(ErrorResponse::new(status, message)))
@@ -26,6 +27,62 @@ fn parse_event_id(event_id: &str) -> Result<Uuid, ApiError> {
             "event_id must be a valid UUID",
         )
     })
+}
+
+async fn find_event_by_idempotency_key(
+    pool: &PgPool,
+    producer_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<IdempotencyLookup>, sqlx::Error> {
+    sqlx::query_as::<_, IdempotencyLookup>(
+        r#"
+        SELECT
+            id,
+            request_fingerprint,
+            status,
+            received_at
+        FROM events
+        WHERE producer_id = $1
+            AND idempotency_key = $2
+        "#,
+    )
+    .bind(producer_id)
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+}
+
+fn idempotency_response(
+    existing_event: IdempotencyLookup,
+    request_fingerprint: &str,
+    event_type: &str,
+) -> Result<(StatusCode, Json<EventResponse>), ApiError> {
+    let (event_id, existing_fingerprint, status, received_at) = existing_event;
+
+    if existing_fingerprint.as_deref() != Some(request_fingerprint) {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "idempotency_key already used with a different request body",
+        ));
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EventResponse {
+            event_id: Some(event_id),
+            status,
+            message: format!("{event_type} event received"),
+            received_at: Some(received_at),
+        }),
+    ))
+}
+
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|db_err| db_err.code())
+        .as_deref()
+        == Some("23505")
 }
 
 pub async fn root_handler() -> (StatusCode, &'static str) {
@@ -60,6 +117,23 @@ pub async fn events_handler(
     }
 
     let fingerprint = request_fingerprint(&payload);
+    let producer_id = payload.producer_id.trim();
+    let idempotency_key = payload.idempotency_key.trim();
+    let event_type = payload.event_type.as_str();
+
+    let existing_event = find_event_by_idempotency_key(&pool, producer_id, idempotency_key)
+        .await
+        .map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to check idempotency key",
+            )
+        })?;
+
+    if let Some(existing_event) = existing_event {
+        return idempotency_response(existing_event, &fingerprint, event_type);
+    }
 
     let insert_result = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
         r#"
@@ -75,10 +149,10 @@ pub async fn events_handler(
         RETURNING id, received_at
         "#,
     )
-    .bind(payload.idempotency_key.trim())
+    .bind(idempotency_key)
     .bind(&fingerprint)
-    .bind(payload.producer_id.trim())
-    .bind(payload.event_type.as_str())
+    .bind(producer_id)
+    .bind(event_type)
     .bind(payload.schema_version as i32)
     .bind(&payload.message)
     .fetch_one(&pool)
@@ -86,7 +160,24 @@ pub async fn events_handler(
 
     let (event_id, received_at) = match insert_result {
         Ok(inserted_event) => inserted_event,
-        Err(_) => {
+        Err(err) => {
+            if is_unique_violation(&err) {
+                let existing_event =
+                    find_event_by_idempotency_key(&pool, producer_id, idempotency_key)
+                        .await
+                        .map_err(|_| {
+                            error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "failed",
+                                "failed to check idempotency key",
+                            )
+                        })?;
+
+                if let Some(existing_event) = existing_event {
+                    return idempotency_response(existing_event, &fingerprint, event_type);
+                }
+            }
+
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed",
@@ -100,7 +191,7 @@ pub async fn events_handler(
         Json(EventResponse {
             event_id: Some(event_id),
             status: "accepted".to_string(),
-            message: format!("{} event received", payload.event_type.as_str()),
+            message: format!("{event_type} event received"),
             received_at: Some(received_at),
         }),
     ))
