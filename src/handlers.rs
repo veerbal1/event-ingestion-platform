@@ -62,16 +62,18 @@ pub async fn events_handler(
     let insert_result = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
         r#"
         INSERT INTO events (
+            idempotency_key,
             producer_id,
             event_type,
             schema_version,
             message
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, received_at
         "#,
     )
-    .bind(payload.producer_id)
+    .bind(payload.idempotency_key.trim())
+    .bind(payload.producer_id.trim())
     .bind(payload.event_type.as_str())
     .bind(payload.schema_version as i32)
     .bind(&payload.message)
@@ -106,11 +108,23 @@ pub async fn get_event_handler(
 ) -> Result<(StatusCode, Json<StoredEventResponse>), ApiError> {
     let event_id = parse_event_id(&event_id)?;
 
-    let lookup_result =
-        sqlx::query_as::<_, (Uuid, String, String, i32, String, String, DateTime<Utc>)>(
-            r#"
+    let lookup_result = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            String,
+            i32,
+            String,
+            String,
+            DateTime<Utc>,
+        ),
+    >(
+        r#"
         SELECT
             id,
+            idempotency_key,
             producer_id,
             event_type,
             schema_version,
@@ -120,14 +134,15 @@ pub async fn get_event_handler(
         FROM events
         WHERE id = $1
         "#,
-        )
-        .bind(event_id)
-        .fetch_optional(&pool)
-        .await;
+    )
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await;
 
     match lookup_result {
         Ok(Some((
             event_id,
+            idempotency_key,
             producer_id,
             event_type,
             schema_version,
@@ -138,6 +153,7 @@ pub async fn get_event_handler(
             StatusCode::OK,
             Json(StoredEventResponse {
                 event_id,
+                idempotency_key,
                 producer_id,
                 event_type,
                 schema_version,
