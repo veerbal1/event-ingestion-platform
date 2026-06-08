@@ -71,7 +71,7 @@ pub async fn events_handler(
         RETURNING id, received_at
         "#,
     )
-    .bind(payload.producer_id.trim())
+    .bind(payload.producer_id)
     .bind(payload.event_type.as_str())
     .bind(payload.schema_version as i32)
     .bind(&payload.message)
