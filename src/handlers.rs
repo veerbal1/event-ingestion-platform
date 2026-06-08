@@ -1,4 +1,5 @@
-use axum::{Json, http::StatusCode};
+use axum::{Json, extract::State, http::StatusCode};
+use sqlx::PgPool;
 
 use crate::models::{CreateEventRequest, EventResponse, validate_request};
 
@@ -7,7 +8,18 @@ pub async fn root_handler() -> (StatusCode, &'static str) {
 }
 
 pub async fn health_handler() -> (StatusCode, &'static str) {
-    (StatusCode::OK, "Health Ok")
+    (StatusCode::OK, "process is alive")
+}
+
+pub async fn ready_handler(
+    State(pool): State<PgPool>,
+) -> Result<(StatusCode, &'static str), (StatusCode, &'static str)> {
+    sqlx::query("SELECT 1")
+        .execute(&pool)
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "database unreachable"))?;
+
+    Ok((StatusCode::OK, "process can reach Postgres"))
 }
 
 pub async fn events_handler(
@@ -26,7 +38,7 @@ pub async fn events_handler(
     }
 
     (
-        StatusCode::OK,
+        StatusCode::ACCEPTED,
         Json(EventResponse {
             event_id: Some("123".to_string()),
             status: "accepted".to_string(),

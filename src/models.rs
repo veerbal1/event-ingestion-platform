@@ -4,17 +4,19 @@ const MAX_PRODUCER_ID_LEN: usize = 64;
 const MAX_MESSAGE_LEN: usize = 1000;
 const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum EventType {
+    #[serde(rename = "user.signup")]
     UserSignup,
+    #[serde(rename = "payment.completed")]
     PaymentCompleted,
 }
 
 impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::UserSignup => "user_signup",
-            Self::PaymentCompleted => "payment_completed",
+            Self::UserSignup => "user.signup",
+            Self::PaymentCompleted => "payment.completed",
         }
     }
 }
