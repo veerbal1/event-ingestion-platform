@@ -1,4 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const MAX_PRODUCER_ID_LEN: usize = 64;
 const MAX_MESSAGE_LEN: usize = 1000;
@@ -48,21 +50,21 @@ pub struct CreateEventRequest {
 
 #[derive(Serialize)]
 pub struct EventResponse {
-    pub event_id: Option<String>,
+    pub event_id: Option<Uuid>,
     pub status: String,
     pub message: String,
-    pub received_at: Option<String>,
+    pub received_at: Option<DateTime<Utc>>,
 }
 
 pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError> {
     let producer_id = req.producer_id.trim();
-    if producer_id.is_empty() || producer_id.len() > MAX_PRODUCER_ID_LEN {
+    if producer_id.trim().is_empty() || producer_id.trim().len() > MAX_PRODUCER_ID_LEN {
         return Err(ValidationError::InvalidProducerId);
     }
     if req.schema_version != SUPPORTED_SCHEMA_VERSION {
         return Err(ValidationError::UnsupportedSchemaVersion);
     }
-    if req.message.len() > MAX_MESSAGE_LEN {
+    if req.message.trim().len() > MAX_MESSAGE_LEN {
         return Err(ValidationError::MessageTooLong);
     }
     Ok(())

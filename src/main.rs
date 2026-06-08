@@ -6,8 +6,8 @@ use axum::{
     routing::{get, post},
 };
 use handlers::{events_handler, health_handler, ready_handler, root_handler};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 
 #[tokio::main]
