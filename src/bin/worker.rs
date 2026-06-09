@@ -48,8 +48,12 @@ async fn main() {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_WORKER_ID.to_string());
+    let fail_after_claim = env_bool("FAIL_AFTER_CLAIM");
 
     println!("{worker_id} started");
+    if fail_after_claim {
+        println!("{worker_id} crash mode enabled: will exit after claiming one event");
+    }
 
     loop {
         match claim_event(&client, &worker_id).await {
@@ -63,6 +67,14 @@ async fn main() {
                     event.locked_at,
                     event.received_at
                 );
+
+                if fail_after_claim {
+                    println!(
+                        "{worker_id} simulating crash after claim for event {}",
+                        event.event_id
+                    );
+                    return;
+                }
 
                 println!("{worker_id} processing event {}", event.event_id);
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -92,6 +104,16 @@ async fn main() {
             }
         }
     }
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 async fn claim_event(
