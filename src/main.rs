@@ -7,8 +7,8 @@ use axum::{
 };
 use handlers::{
     claim_event_handler, complete_event_handler, events_handler, get_event_handler,
-    get_event_status_handler, health_handler, list_events_handler, ready_handler, root_handler,
-    update_event_status_handler,
+    get_event_status_handler, health_handler, list_events_handler, list_stale_events_handler,
+    ready_handler, root_handler, update_event_status_handler,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -37,6 +37,7 @@ async fn main() {
         .route("/ready", get(ready_handler))
         .route("/v1/events", post(events_handler).get(list_events_handler))
         .route("/v1/events/claim", post(claim_event_handler))
+        .route("/v1/events/stale", get(list_stale_events_handler))
         .route("/v1/events/{event_id}", get(get_event_handler))
         .route(
             "/v1/events/{event_id}/complete",

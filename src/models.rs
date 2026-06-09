@@ -106,6 +106,11 @@ pub struct ListEventsQuery {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct ListStaleEventsQuery {
+    pub older_than_seconds: i64,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct ClaimEventRequest {
     pub worker_id: String,
 }

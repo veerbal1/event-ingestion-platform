@@ -11,12 +11,13 @@ use uuid::Uuid;
 use crate::models::{
     ClaimEventRequest, ClaimEventResponse, CompleteEventRequest, CreateEventRequest, ErrorResponse,
     EventResponse, EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery,
-    StoredEventResponse, UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint,
-    validate_request, validate_worker_id,
+    ListStaleEventsQuery, StoredEventResponse, UpdateEventStatusRequest,
+    is_valid_status_transition, request_fingerprint, validate_request, validate_worker_id,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
 type IdempotencyLookup = (Uuid, Option<String>, String, DateTime<Utc>);
+const MAX_STALE_LOOKBACK_SECONDS: i64 = 86_400;
 
 fn error_response(status_code: StatusCode, status: &str, message: &str) -> ApiError {
     (status_code, Json(ErrorResponse::new(status, message)))
@@ -245,6 +246,75 @@ pub async fn list_events_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed",
             "failed to list events",
+        )
+    })?;
+
+    Ok(Json(
+        events
+            .into_iter()
+            .map(
+                |(event_id, event_type, status, locked_by, locked_at, received_at)| {
+                    EventSummaryResponse {
+                        event_id,
+                        event_type,
+                        status,
+                        locked_by,
+                        locked_at,
+                        received_at,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
+pub async fn list_stale_events_handler(
+    State(pool): State<PgPool>,
+    Query(query): Query<ListStaleEventsQuery>,
+) -> Result<Json<Vec<EventSummaryResponse>>, ApiError> {
+    if query.older_than_seconds <= 0 || query.older_than_seconds > MAX_STALE_LOOKBACK_SECONDS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "older_than_seconds must be between 1 and 86400",
+        ));
+    }
+
+    let events = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            DateTime<Utc>,
+        ),
+    >(
+        r#"
+        SELECT
+            id,
+            event_type,
+            status,
+            locked_by,
+            locked_at,
+            received_at
+        FROM events
+        WHERE status = 'processing'
+            AND locked_at IS NOT NULL
+            AND locked_at < now() - ($1::bigint * INTERVAL '1 second')
+        ORDER BY locked_at ASC
+        LIMIT 20
+        "#,
+    )
+    .bind(query.older_than_seconds)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed",
+            "failed to list stale events",
         )
     })?;
 
