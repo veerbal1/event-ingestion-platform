@@ -144,6 +144,8 @@ pub struct StoredEventResponse {
     pub schema_version: i32,
     pub message: String,
     pub status: String,
+    pub completed_by: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub received_at: DateTime<Utc>,
 }
 

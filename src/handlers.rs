@@ -590,7 +590,9 @@ pub async fn complete_event_handler(
         UPDATE events
         SET status = $1,
             locked_by = NULL,
-            locked_at = NULL
+            locked_at = NULL,
+            completed_by = $3,
+            completed_at = now()
         WHERE id = $2
             AND status = 'processing'
             AND locked_by = $3
@@ -643,6 +645,8 @@ pub async fn get_event_handler(
             String,
             String,
             DateTime<Utc>,
+            Option<String>,
+            Option<DateTime<Utc>>,
         ),
     >(
         r#"
@@ -655,7 +659,9 @@ pub async fn get_event_handler(
             schema_version,
             message,
             status,
-            received_at
+            received_at,
+            completed_by,
+            completed_at
         FROM events
         WHERE id = $1
         "#,
@@ -675,6 +681,8 @@ pub async fn get_event_handler(
             message,
             status,
             received_at,
+            completed_by,
+            completed_at,
         ))) => Ok((
             StatusCode::OK,
             Json(StoredEventResponse {
@@ -686,6 +694,8 @@ pub async fn get_event_handler(
                 schema_version,
                 message,
                 status,
+                completed_by,
+                completed_at,
                 received_at,
             }),
         )),
