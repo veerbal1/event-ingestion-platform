@@ -9,10 +9,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{
-    ClaimEventRequest, ClaimEventResponse, CreateEventRequest, ErrorResponse, EventResponse,
-    EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery, StoredEventResponse,
-    UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint, validate_request,
-    validate_worker_id,
+    ClaimEventRequest, ClaimEventResponse, CompleteEventRequest, CreateEventRequest, ErrorResponse,
+    EventResponse, EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery,
+    StoredEventResponse, UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint,
+    validate_request, validate_worker_id,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -324,6 +324,135 @@ pub async fn claim_event_handler(
         )
             .into_response()),
         None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
+pub async fn complete_event_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<String>,
+    Json(payload): Json<CompleteEventRequest>,
+) -> Result<(StatusCode, Json<EventStatusResponse>), ApiError> {
+    let event_id = parse_event_id(&event_id)?;
+
+    if let Err(err) = validate_worker_id(&payload.worker_id) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            err.message(),
+        ));
+    }
+
+    let requested_status = EventStatus::parse(payload.status.trim()).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "status must be one of: processed, failed",
+        )
+    })?;
+
+    let requested_status_value = match requested_status {
+        EventStatus::Processed | EventStatus::Failed => requested_status.as_str(),
+        EventStatus::Accepted | EventStatus::Processing => {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "status must be one of: processed, failed",
+            ));
+        }
+    };
+
+    let worker_id = payload.worker_id.trim();
+
+    let ownership_result = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"
+        SELECT status, locked_by
+        FROM events
+        WHERE id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let (current_status, locked_by) = match ownership_result {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "event not found",
+            ));
+        }
+        Err(_) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to fetch event ownership",
+            ));
+        }
+    };
+
+    if current_status != EventStatus::Processing.as_str() {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event is not processing",
+        ));
+    }
+
+    let Some(locked_by) = locked_by else {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event is not owned",
+        ));
+    };
+
+    if locked_by != worker_id {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event owned by another worker",
+        ));
+    }
+
+    let update_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
+        r#"
+        UPDATE events
+        SET status = $1,
+            locked_by = NULL,
+            locked_at = NULL
+        WHERE id = $2
+            AND status = 'processing'
+            AND locked_by = $3
+        RETURNING id, status, received_at
+        "#,
+    )
+    .bind(requested_status_value)
+    .bind(event_id)
+    .bind(worker_id)
+    .fetch_optional(&pool)
+    .await;
+
+    match update_result {
+        Ok(Some((event_id, status, received_at))) => Ok((
+            StatusCode::OK,
+            Json(EventStatusResponse {
+                event_id,
+                status,
+                received_at,
+            }),
+        )),
+        Ok(None) => Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event ownership changed before completion",
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed",
+            "failed to complete event",
+        )),
     }
 }
 

@@ -110,6 +110,12 @@ pub struct ClaimEventRequest {
     pub worker_id: String,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct CompleteEventRequest {
+    pub worker_id: String,
+    pub status: String,
+}
+
 #[derive(Serialize)]
 pub struct EventResponse {
     pub event_id: Option<Uuid>,
