@@ -121,6 +121,11 @@ pub struct CompleteEventRequest {
     pub status: String,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct RequeueEventRequest {
+    pub older_than_seconds: i64,
+}
+
 #[derive(Serialize)]
 pub struct EventResponse {
     pub event_id: Option<Uuid>,

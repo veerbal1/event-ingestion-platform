@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::models::{
     ClaimEventRequest, ClaimEventResponse, CompleteEventRequest, CreateEventRequest, ErrorResponse,
     EventResponse, EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery,
-    ListStaleEventsQuery, StoredEventResponse, UpdateEventStatusRequest,
+    ListStaleEventsQuery, RequeueEventRequest, StoredEventResponse, UpdateEventStatusRequest,
     is_valid_status_transition, request_fingerprint, validate_request, validate_worker_id,
 };
 
@@ -31,6 +31,18 @@ fn parse_event_id(event_id: &str) -> Result<Uuid, ApiError> {
             "event_id must be a valid UUID",
         )
     })
+}
+
+fn validate_stale_threshold(older_than_seconds: i64) -> Result<(), ApiError> {
+    if older_than_seconds <= 0 || older_than_seconds > MAX_STALE_LOOKBACK_SECONDS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "older_than_seconds must be between 1 and 86400",
+        ));
+    }
+
+    Ok(())
 }
 
 async fn find_event_by_idempotency_key(
@@ -272,13 +284,7 @@ pub async fn list_stale_events_handler(
     State(pool): State<PgPool>,
     Query(query): Query<ListStaleEventsQuery>,
 ) -> Result<Json<Vec<EventSummaryResponse>>, ApiError> {
-    if query.older_than_seconds <= 0 || query.older_than_seconds > MAX_STALE_LOOKBACK_SECONDS {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "older_than_seconds must be between 1 and 86400",
-        ));
-    }
+    validate_stale_threshold(query.older_than_seconds)?;
 
     let events = sqlx::query_as::<
         _,
@@ -335,6 +341,99 @@ pub async fn list_stale_events_handler(
             )
             .collect(),
     ))
+}
+
+pub async fn requeue_event_handler(
+    State(pool): State<PgPool>,
+    Path(event_id): Path<String>,
+    Json(payload): Json<RequeueEventRequest>,
+) -> Result<(StatusCode, Json<EventStatusResponse>), ApiError> {
+    let event_id = parse_event_id(&event_id)?;
+    validate_stale_threshold(payload.older_than_seconds)?;
+
+    let event_state_result = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+        r#"
+        SELECT status, locked_at
+        FROM events
+        WHERE id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(&pool)
+    .await;
+
+    let (current_status, locked_at) = match event_state_result {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "event not found",
+            ));
+        }
+        Err(_) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to fetch event state",
+            ));
+        }
+    };
+
+    if current_status != EventStatus::Processing.as_str() {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event is not processing",
+        ));
+    }
+
+    if locked_at.is_none() {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event is not locked",
+        ));
+    }
+
+    let update_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
+        r#"
+        UPDATE events
+        SET status = 'accepted',
+            locked_by = NULL,
+            locked_at = NULL
+        WHERE id = $1
+            AND status = 'processing'
+            AND locked_at IS NOT NULL
+            AND locked_at < now() - ($2::bigint * INTERVAL '1 second')
+        RETURNING id, status, received_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(payload.older_than_seconds)
+    .fetch_optional(&pool)
+    .await;
+
+    match update_result {
+        Ok(Some((event_id, status, received_at))) => Ok((
+            StatusCode::OK,
+            Json(EventStatusResponse {
+                event_id,
+                status,
+                received_at,
+            }),
+        )),
+        Ok(None) => Err(error_response(
+            StatusCode::CONFLICT,
+            "conflict",
+            "event is not stale enough to requeue",
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed",
+            "failed to requeue event",
+        )),
+    }
 }
 
 pub async fn claim_event_handler(
