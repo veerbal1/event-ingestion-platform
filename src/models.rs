@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 const MAX_PRODUCER_ID_LEN: usize = 64;
 const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+const MAX_WORKER_ID_LEN: usize = 64;
 const MAX_MESSAGE_LEN: usize = 1000;
 const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
@@ -64,6 +65,7 @@ impl EventType {
 pub enum ValidationError {
     InvalidProducerId,
     InvalidIdempotencyKey,
+    InvalidWorkerId,
     UnsupportedSchemaVersion,
     EmptyMessage,
     MessageTooLong,
@@ -76,6 +78,7 @@ impl ValidationError {
             Self::InvalidIdempotencyKey => {
                 "idempotency_key must be 1-128 non-whitespace characters"
             }
+            Self::InvalidWorkerId => "worker_id must be 1-64 non-whitespace characters",
             Self::UnsupportedSchemaVersion => "unsupported schema_version",
             Self::EmptyMessage => "message must not be empty",
             Self::MessageTooLong => "message exceeds maximum length",
@@ -95,6 +98,16 @@ pub struct CreateEventRequest {
 #[derive(Deserialize, Debug)]
 pub struct UpdateEventStatusRequest {
     pub status: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ListEventsQuery {
+    pub status: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ClaimEventRequest {
+    pub worker_id: String,
 }
 
 #[derive(Serialize)]
@@ -122,6 +135,26 @@ pub struct StoredEventResponse {
 pub struct EventStatusResponse {
     pub event_id: Uuid,
     pub status: String,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct EventSummaryResponse {
+    pub event_id: Uuid,
+    pub event_type: String,
+    pub status: String,
+    pub locked_by: Option<String>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct ClaimEventResponse {
+    pub event_id: Uuid,
+    pub event_type: String,
+    pub status: String,
+    pub locked_by: String,
+    pub locked_at: DateTime<Utc>,
     pub received_at: DateTime<Utc>,
 }
 
@@ -161,6 +194,14 @@ pub fn validate_request(req: &CreateEventRequest) -> Result<(), ValidationError>
     }
     if message.len() > MAX_MESSAGE_LEN {
         return Err(ValidationError::MessageTooLong);
+    }
+    Ok(())
+}
+
+pub fn validate_worker_id(worker_id: &str) -> Result<(), ValidationError> {
+    let worker_id = worker_id.trim();
+    if worker_id.is_empty() || worker_id.len() > MAX_WORKER_ID_LEN {
+        return Err(ValidationError::InvalidWorkerId);
     }
     Ok(())
 }

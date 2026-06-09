@@ -1,16 +1,18 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{
-    CreateEventRequest, ErrorResponse, EventResponse, EventStatus, EventStatusResponse,
-    StoredEventResponse, UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint,
-    validate_request,
+    ClaimEventRequest, ClaimEventResponse, CreateEventRequest, ErrorResponse, EventResponse,
+    EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery, StoredEventResponse,
+    UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint, validate_request,
+    validate_worker_id,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -196,6 +198,133 @@ pub async fn events_handler(
             received_at: Some(received_at),
         }),
     ))
+}
+
+pub async fn list_events_handler(
+    State(pool): State<PgPool>,
+    Query(query): Query<ListEventsQuery>,
+) -> Result<Json<Vec<EventSummaryResponse>>, ApiError> {
+    let status = EventStatus::parse(query.status.trim()).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "status must be one of: accepted, processing, processed, failed",
+        )
+    })?;
+
+    let events = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            DateTime<Utc>,
+        ),
+    >(
+        r#"
+        SELECT
+            id,
+            event_type,
+            status,
+            locked_by,
+            locked_at,
+            received_at
+        FROM events
+        WHERE status = $1
+        ORDER BY received_at ASC
+        LIMIT 20
+        "#,
+    )
+    .bind(status.as_str())
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed",
+            "failed to list events",
+        )
+    })?;
+
+    Ok(Json(
+        events
+            .into_iter()
+            .map(
+                |(event_id, event_type, status, locked_by, locked_at, received_at)| {
+                    EventSummaryResponse {
+                        event_id,
+                        event_type,
+                        status,
+                        locked_by,
+                        locked_at,
+                        received_at,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
+pub async fn claim_event_handler(
+    State(pool): State<PgPool>,
+    Json(payload): Json<ClaimEventRequest>,
+) -> Result<Response, ApiError> {
+    if let Err(err) = validate_worker_id(&payload.worker_id) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            err.message(),
+        ));
+    }
+
+    let worker_id = payload.worker_id.trim();
+
+    let claim_result =
+        sqlx::query_as::<_, (Uuid, String, String, String, DateTime<Utc>, DateTime<Utc>)>(
+            r#"
+        UPDATE events
+        SET status = 'processing',
+            locked_by = $1,
+            locked_at = now()
+        WHERE id = (
+            SELECT id
+            FROM events
+            WHERE status = 'accepted'
+            ORDER BY received_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, event_type, status, locked_by, locked_at, received_at
+        "#,
+        )
+        .bind(worker_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to claim event",
+            )
+        })?;
+
+    match claim_result {
+        Some((event_id, event_type, status, locked_by, locked_at, received_at)) => Ok((
+            StatusCode::OK,
+            Json(ClaimEventResponse {
+                event_id,
+                event_type,
+                status,
+                locked_by,
+                locked_at,
+                received_at,
+            }),
+        )
+            .into_response()),
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
 }
 
 pub async fn get_event_handler(
