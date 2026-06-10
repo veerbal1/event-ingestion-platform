@@ -67,16 +67,6 @@ async fn main() {
 
         match claim_event(&client, &worker_id).await {
             Ok(Some(event)) => {
-                println!(
-                    "{} claimed event {} ({}) with status {} at {} (received_at {})",
-                    event.locked_by,
-                    event.event_id,
-                    event.event_type,
-                    event.status,
-                    event.locked_at,
-                    event.received_at
-                );
-
                 if fail_after_claim {
                     println!(
                         "{worker_id} simulating crash after claim for event {}",
@@ -85,14 +75,14 @@ async fn main() {
                     return;
                 }
 
-                println!("{worker_id} processing event {}", event.event_id);
+                println!("{worker_id} processing event {} ({})", event.event_id, event.event_type);
                 tokio::time::sleep(Duration::from_secs(1)).await;
 
                 match complete_event(&client, &worker_id, &event.event_id).await {
                     Ok(completed) => {
                         println!(
-                            "{} completed event {} as {} (received_at {})",
-                            worker_id, completed.event_id, completed.status, completed.received_at
+                            "{} completed event {} as {}",
+                            worker_id, completed.event_id, completed.status
                         );
                     }
                     Err(err) => {
@@ -102,13 +92,13 @@ async fn main() {
                         );
                     }
                 }
+                println!();
             }
             Ok(None) => {
-                println!("{worker_id} found no accepted events; sleeping");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(err) => {
-                println!("{worker_id} claim failed: {err}; sleeping");
+                println!("{worker_id} claim failed: {err}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
