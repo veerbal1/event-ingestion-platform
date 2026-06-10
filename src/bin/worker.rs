@@ -55,7 +55,16 @@ async fn main() {
         println!("{worker_id} crash mode enabled: will exit after claiming one event");
     }
 
+    let shutdown = tokio::spawn(async {
+        tokio::signal::ctrl_c().await.ok();
+    });
+
     loop {
+        if shutdown.is_finished() {
+            println!("{worker_id} shutting down");
+            return;
+        }
+
         match claim_event(&client, &worker_id).await {
             Ok(Some(event)) => {
                 println!(

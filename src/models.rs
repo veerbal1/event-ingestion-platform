@@ -13,6 +13,9 @@ const STATUS_ACCEPTED: &str = "accepted";
 const STATUS_PROCESSING: &str = "processing";
 const STATUS_PROCESSED: &str = "processed";
 const STATUS_FAILED: &str = "failed";
+const STATUS_DEAD_LETTERED: &str = "dead_lettered";
+
+pub const MAX_ATTEMPTS: i32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum EventType {
@@ -29,6 +32,7 @@ pub enum EventStatus {
     Processing,
     Processed,
     Failed,
+    DeadLettered,
 }
 
 impl EventStatus {
@@ -38,6 +42,7 @@ impl EventStatus {
             STATUS_PROCESSING => Some(Self::Processing),
             STATUS_PROCESSED => Some(Self::Processed),
             STATUS_FAILED => Some(Self::Failed),
+            STATUS_DEAD_LETTERED => Some(Self::DeadLettered),
             _ => None,
         }
     }
@@ -48,6 +53,7 @@ impl EventStatus {
             Self::Processing => STATUS_PROCESSING,
             Self::Processed => STATUS_PROCESSED,
             Self::Failed => STATUS_FAILED,
+            Self::DeadLettered => STATUS_DEAD_LETTERED,
         }
     }
 }
@@ -144,8 +150,11 @@ pub struct StoredEventResponse {
     pub schema_version: i32,
     pub message: String,
     pub status: String,
+    pub attempt_count: i32,
     pub completed_by: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub dead_lettered_at: Option<DateTime<Utc>>,
+    pub dead_letter_reason: Option<String>,
     pub received_at: DateTime<Utc>,
 }
 
@@ -230,7 +239,10 @@ pub fn is_valid_status_transition(current: &str, next: &EventStatus) -> bool {
             STATUS_ACCEPTED,
             EventStatus::Processing | EventStatus::Processed | EventStatus::Failed,
         ) => true,
-        (STATUS_PROCESSING, EventStatus::Processed | EventStatus::Failed) => true,
+        (
+            STATUS_PROCESSING,
+            EventStatus::Processed | EventStatus::Failed | EventStatus::DeadLettered,
+        ) => true,
         _ => false,
     }
 }

@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::models::{
     ClaimEventRequest, ClaimEventResponse, CompleteEventRequest, CreateEventRequest, ErrorResponse,
     EventResponse, EventStatus, EventStatusResponse, EventSummaryResponse, ListEventsQuery,
-    ListStaleEventsQuery, RequeueEventRequest, StoredEventResponse, UpdateEventStatusRequest,
-    is_valid_status_transition, request_fingerprint, validate_request, validate_worker_id,
+    ListStaleEventsQuery, MAX_ATTEMPTS, RequeueEventRequest, StoredEventResponse,
+    UpdateEventStatusRequest, is_valid_status_transition, request_fingerprint, validate_request,
+    validate_worker_id,
 };
 
 type ApiError = (StatusCode, Json<ErrorResponse>);
@@ -221,7 +222,7 @@ pub async fn list_events_handler(
         error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "status must be one of: accepted, processing, processed, failed",
+            "status must be one of: accepted, processing, processed, failed, dead_lettered",
         )
     })?;
 
@@ -347,13 +348,13 @@ pub async fn requeue_event_handler(
     State(pool): State<PgPool>,
     Path(event_id): Path<String>,
     Json(payload): Json<RequeueEventRequest>,
-) -> Result<(StatusCode, Json<EventStatusResponse>), ApiError> {
+) -> Result<(StatusCode, Json<StoredEventResponse>), ApiError> {
     let event_id = parse_event_id(&event_id)?;
     validate_stale_threshold(payload.older_than_seconds)?;
 
-    let event_state_result = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+    let event_state_result = sqlx::query_as::<_, (String, Option<DateTime<Utc>>, i32)>(
         r#"
-        SELECT status, locked_at
+        SELECT status, locked_at, attempt_count
         FROM events
         WHERE id = $1
         "#,
@@ -362,7 +363,7 @@ pub async fn requeue_event_handler(
     .fetch_optional(&pool)
     .await;
 
-    let (current_status, locked_at) = match event_state_result {
+    let (current_status, locked_at, attempt_count) = match event_state_result {
         Ok(Some(row)) => row,
         Ok(None) => {
             return Err(error_response(
@@ -396,43 +397,206 @@ pub async fn requeue_event_handler(
         ));
     }
 
-    let update_result = sqlx::query_as::<_, (Uuid, String, DateTime<Utc>)>(
-        r#"
-        UPDATE events
-        SET status = 'accepted',
-            locked_by = NULL,
-            locked_at = NULL
-        WHERE id = $1
-            AND status = 'processing'
-            AND locked_at IS NOT NULL
-            AND locked_at < now() - ($2::bigint * INTERVAL '1 second')
-        RETURNING id, status, received_at
-        "#,
-    )
-    .bind(event_id)
-    .bind(payload.older_than_seconds)
-    .fetch_optional(&pool)
-    .await;
+    let next_attempt = attempt_count + 1;
 
-    match update_result {
-        Ok(Some((event_id, status, received_at))) => Ok((
-            StatusCode::OK,
-            Json(EventStatusResponse {
-                event_id,
+    if next_attempt >= MAX_ATTEMPTS {
+        let result = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                Option<String>,
+                String,
+                String,
+                i32,
+                String,
+                String,
+                i32,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                DateTime<Utc>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            r#"
+            UPDATE events
+            SET status = 'dead_lettered',
+                locked_by = NULL,
+                locked_at = NULL,
+                attempt_count = attempt_count + 1,
+                dead_lettered_at = now(),
+                dead_letter_reason = 'max retry attempts reached'
+            WHERE id = $1
+                AND status = 'processing'
+                AND locked_at IS NOT NULL
+                AND locked_at < now() - ($2::bigint * INTERVAL '1 second')
+            RETURNING
+                id,
+                idempotency_key,
+                request_fingerprint,
+                producer_id,
+                event_type,
+                schema_version,
+                message,
                 status,
+                attempt_count,
+                dead_lettered_at,
+                dead_letter_reason,
                 received_at,
-            }),
-        )),
-        Ok(None) => Err(error_response(
-            StatusCode::CONFLICT,
-            "conflict",
-            "event is not stale enough to requeue",
-        )),
-        Err(_) => Err(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed",
-            "failed to requeue event",
-        )),
+                completed_by,
+                completed_at
+            "#,
+        )
+        .bind(event_id)
+        .bind(payload.older_than_seconds)
+        .fetch_optional(&pool)
+        .await;
+
+        match result {
+            Ok(Some((
+                event_id,
+                idempotency_key,
+                request_fingerprint,
+                producer_id,
+                event_type,
+                schema_version,
+                message,
+                status,
+                attempt_count,
+                dead_lettered_at,
+                dead_letter_reason,
+                received_at,
+                completed_by,
+                completed_at,
+            ))) => Ok((
+                StatusCode::OK,
+                Json(StoredEventResponse {
+                    event_id,
+                    idempotency_key,
+                    request_fingerprint,
+                    producer_id,
+                    event_type,
+                    schema_version,
+                    message,
+                    status,
+                    attempt_count,
+                    completed_by,
+                    completed_at,
+                    dead_lettered_at,
+                    dead_letter_reason,
+                    received_at,
+                }),
+            )),
+            Ok(None) => Err(error_response(
+                StatusCode::CONFLICT,
+                "conflict",
+                "event is not stale enough to requeue",
+            )),
+            Err(_) => Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to dead-letter event",
+            )),
+        }
+    } else {
+        let result = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                Option<String>,
+                String,
+                String,
+                i32,
+                String,
+                String,
+                i32,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                DateTime<Utc>,
+                Option<String>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            r#"
+            UPDATE events
+            SET status = 'accepted',
+                locked_by = NULL,
+                locked_at = NULL,
+                attempt_count = attempt_count + 1
+            WHERE id = $1
+                AND status = 'processing'
+                AND locked_at IS NOT NULL
+                AND locked_at < now() - ($2::bigint * INTERVAL '1 second')
+            RETURNING
+                id,
+                idempotency_key,
+                request_fingerprint,
+                producer_id,
+                event_type,
+                schema_version,
+                message,
+                status,
+                attempt_count,
+                dead_lettered_at,
+                dead_letter_reason,
+                received_at,
+                completed_by,
+                completed_at
+            "#,
+        )
+        .bind(event_id)
+        .bind(payload.older_than_seconds)
+        .fetch_optional(&pool)
+        .await;
+
+        match result {
+            Ok(Some((
+                event_id,
+                idempotency_key,
+                request_fingerprint,
+                producer_id,
+                event_type,
+                schema_version,
+                message,
+                status,
+                attempt_count,
+                dead_lettered_at,
+                dead_letter_reason,
+                received_at,
+                completed_by,
+                completed_at,
+            ))) => Ok((
+                StatusCode::OK,
+                Json(StoredEventResponse {
+                    event_id,
+                    idempotency_key,
+                    request_fingerprint,
+                    producer_id,
+                    event_type,
+                    schema_version,
+                    message,
+                    status,
+                    attempt_count,
+                    completed_by,
+                    completed_at,
+                    dead_lettered_at,
+                    dead_letter_reason,
+                    received_at,
+                }),
+            )),
+            Ok(None) => Err(error_response(
+                StatusCode::CONFLICT,
+                "conflict",
+                "event is not stale enough to requeue",
+            )),
+            Err(_) => Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+                "failed to requeue event",
+            )),
+        }
     }
 }
 
@@ -521,7 +685,7 @@ pub async fn complete_event_handler(
 
     let requested_status_value = match requested_status {
         EventStatus::Processed | EventStatus::Failed => requested_status.as_str(),
-        EventStatus::Accepted | EventStatus::Processing => {
+        EventStatus::Accepted | EventStatus::Processing | EventStatus::DeadLettered => {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
@@ -644,6 +808,9 @@ pub async fn get_event_handler(
             i32,
             String,
             String,
+            i32,
+            Option<DateTime<Utc>>,
+            Option<String>,
             DateTime<Utc>,
             Option<String>,
             Option<DateTime<Utc>>,
@@ -659,6 +826,9 @@ pub async fn get_event_handler(
             schema_version,
             message,
             status,
+            attempt_count,
+            dead_lettered_at,
+            dead_letter_reason,
             received_at,
             completed_by,
             completed_at
@@ -680,6 +850,9 @@ pub async fn get_event_handler(
             schema_version,
             message,
             status,
+            attempt_count,
+            dead_lettered_at,
+            dead_letter_reason,
             received_at,
             completed_by,
             completed_at,
@@ -694,8 +867,11 @@ pub async fn get_event_handler(
                 schema_version,
                 message,
                 status,
+                attempt_count,
                 completed_by,
                 completed_at,
+                dead_lettered_at,
+                dead_letter_reason,
                 received_at,
             }),
         )),
@@ -764,7 +940,7 @@ pub async fn update_event_status_handler(
         error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "status must be one of: accepted, processing, processed, failed",
+            "status must be one of: accepted, processing, processed, failed, dead_lettered",
         )
     })?;
     let next_status_value = next_status.as_str();
