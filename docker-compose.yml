@@ -9,5 +9,13 @@ services:
       - POSTGRES_DB=event_ingestion
     volumes:
       - postgres_data:/var/lib/postgresql/data
+  
+  nats:
+    image: nats:2.10-alpine
+    command: --jetstream -m 8222
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
 volumes:
   postgres_data:
