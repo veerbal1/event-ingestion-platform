@@ -18,7 +18,7 @@ Worker ◄──claim────────┘
 |---|---|
 | `event-ingestion-platform` | HTTP API server (Axum + sqlx) |
 | `worker` | Background worker that claims, processes, and completes events |
-| `producer` | Load generator — sends events with random data and idempotent replays |
+| `producer` | Load generator - sends events with random data and idempotent replays |
 
 ## Quick Start
 
@@ -119,11 +119,11 @@ curl -X POST http://localhost:3000/v1/events/<event_id>/requeue \
 
 ## Features
 
-- **Idempotent ingestion** — `(producer_id, idempotency_key)` unique constraint prevents duplicates. Same key + same body returns 202 with the original `event_id`. Same key + different body returns 409 Conflict.
-- **Worker claim + lock** — `FOR UPDATE SKIP LOCKED` ensures no two workers claim the same event. Lock ownership is validated on completion.
-- **Automatic retry** — Stale processing events (worker crashed) are detected via `locked_at < now() - threshold` and requeued. `attempt_count` tracks retries.
-- **Dead letter** — After `MAX_ATTEMPTS` (3) retries, events are marked `dead_lettered` with timestamp and reason. They will not be picked up again.
-- **Graceful shutdown** — API server drains in-flight requests before exiting. Worker finishes its current event, then stops. Both listen for SIGINT and SIGTERM.
+- **Idempotent ingestion** - `(producer_id, idempotency_key)` unique constraint prevents duplicates. Same key + same body returns 202 with the original `event_id`. Same key + different body returns 409 Conflict.
+- **Worker claim + lock** - `FOR UPDATE SKIP LOCKED` ensures no two workers claim the same event. Lock ownership is validated on completion.
+- **Automatic retry** - Stale processing events (worker crashed) are detected via `locked_at < now() - threshold` and requeued. `attempt_count` tracks retries.
+- **Dead letter** - After `MAX_ATTEMPTS` (3) retries, events are marked `dead_lettered` with timestamp and reason. They will not be picked up again.
+- **Graceful shutdown** - API server drains in-flight requests before exiting. Worker finishes its current event, then stops. Both listen for SIGINT and SIGTERM.
 
 ## Statuses
 
